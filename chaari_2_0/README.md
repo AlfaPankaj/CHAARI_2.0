@@ -21,15 +21,6 @@ CHAARI 2.0 is a privacy-first, full-duplex, bilingual (Hindi + English / Hinglis
 
 ---
 
-## 📺 Demo
-
-<div align="center">
-
-> **[Add your demo video here]**
-> *Record a 60-90 second screen capture showing: wake word trigger → voice command → tool execution → TTS response with echo effect*
-
-</div>
-
 ---
 
 ## ✨ Key Features
