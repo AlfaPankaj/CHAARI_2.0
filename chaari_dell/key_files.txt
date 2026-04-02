@@ -1,0 +1,382 @@
+# CHAARI 2.0 — Dell Execution Node — agent.py (Main Entry Point)
+# ═══════════════════════════════════════════════════════════
+# Wires together:
+#   - Crypto verification (ASUS commands)
+#   - Validation pipeline (7-step)
+#   - Capability router (routes to modules)
+#   - Result signing (Dell private key)
+#
+# Usage:
+#   python agent.py                 — Start Dell agent
+#   python agent.py --test-local    — Self-test with synthetic packets
+# ═══════════════════════════════════════════════════════════
+
+import os
+import sys
+import json
+import time
+from datetime import datetime, timezone
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from chaari_dell.config import (
+    NODE_ID, NODE_NAME, KEY_DIR, LOG_DIR,
+    DELL_PRIVATE_KEY_NAME, ASUS_PUBLIC_KEY_NAME,
+    AUTHORIZED_CAPABILITIES,
+)
+from chaari_dell.crypto.signature_verifier import SignatureVerifier
+from chaari_dell.crypto.validation_pipeline import ValidationPipeline
+from chaari_dell.crypto.nonce_store import DellNonceStore
+from chaari_dell.executor.capability_router import CapabilityRouter
+from chaari_dell.executor.power_module import PowerModule
+from chaari_dell.executor.filesystem_module import FilesystemModule
+from chaari_dell.executor.application_module import ApplicationModule
+from chaari_dell.executor.system_module import SystemModule
+from chaari_dell.executor.communication_module import CommunicationModule
+from chaari_dell.executor.media_module import MediaModule
+from chaari_dell.models.packet_models import ExecutionResult
+
+
+class DellAgent:
+    """
+    Dell Execution Node — receives signed commands, validates, executes, signs results.
+    
+    Lifecycle:
+        1. Boot: Load keys, init validation pipeline, register capability modules
+        2. Receive: Accept signed command packet
+        3. Validate: Run 7-step validation pipeline
+        4. Route: Send to correct capability module
+        5. Execute: Module runs hardcoded OS command
+        6. Sign: Sign result with Dell private key
+        7. Return: Signed result packet back to ASUS
+    """
+
+    def __init__(self):
+        self._verifier: SignatureVerifier = None
+        self._pipeline: ValidationPipeline = None
+        self._router: CapabilityRouter = None
+        self._nonce_store: DellNonceStore = None
+        self._booted = False
+        self._boot_time: str = None
+
+    def boot(self) -> bool:
+        """Initialize all subsystems. Returns True if successful."""
+        print(f"\n{'═' * 60}")
+        print(f"  CHAARI 2.0 — Dell Execution Node")
+        print(f"  Node: {NODE_ID} ({NODE_NAME})")
+        print(f"{'═' * 60}\n")
+
+        # ── Step 1: Ensure directories ──
+        os.makedirs(KEY_DIR, exist_ok=True)
+        os.makedirs(LOG_DIR, exist_ok=True)
+        print(f"  [✓] Directories ready")
+
+        # ── Step 2: Load crypto keys ──
+        try:
+            self._verifier = SignatureVerifier(KEY_DIR)
+            print(f"  [✓] Crypto keys loaded")
+        except Exception as e:
+            print(f"  [✗] Crypto init failed: {e}")
+            print(f"      → Copy asus_public.pem and dell keys to {KEY_DIR}")
+            return False
+
+        # ── Step 3: Init nonce store ──
+        self._nonce_store = DellNonceStore()
+        print(f"  [✓] Nonce store initialized")
+
+        # ── Step 4: Init validation pipeline ──
+        self._pipeline = ValidationPipeline(self._verifier, self._nonce_store)
+        print(f"  [✓] Validation pipeline ready (7-step)")
+
+        # ── Step 5: Register capability modules ──
+        self._router = CapabilityRouter()
+        self._router.register("POWER", PowerModule())
+        self._router.register("FILESYSTEM", FilesystemModule())
+        self._router.register("APPLICATION", ApplicationModule())
+        self._router.register("SYSTEM", SystemModule())
+        self._router.register("COMMUNICATION", CommunicationModule())
+        self._router.register("MEDIA", MediaModule())
+        print(f"  [✓] Capability modules registered:")
+# CHAARI 2.0 — Dell network/server.py — TCP Command Server
+# ═══════════════════════════════════════════════════════════
+# Responsibility:
+#   ✔ Listen on LISTEN_PORT for ASUS connections
+#   ✔ 3-step handshake (hello → response → ack)
+#   ✔ IP whitelist enforcement
+#   ✔ Receive signed command packets → forward to DellAgent
+#   ✔ Send signed result packets back
+#   ✔ Heartbeat response
+#   ✔ Graceful disconnect handling
+#
+# Threading model:
+#   Main thread: accept loop
+#   Per-client thread: message recv/send loop
+#   Heartbeat is handled inline (client sends, server acks)
+# ═══════════════════════════════════════════════════════════
+
+import os
+import sys
+import json
+import uuid
+import socket
+import logging
+import threading
+import time
+from datetime import datetime, timezone
+
+# Add parent to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from chaari_2_0.network import (
+    send_message, recv_message, ProtocolError,
+    make_handshake_response, make_handshake_ack, make_heartbeat_ack,
+    PROTOCOL_VERSION,
+)
+from chaari_dell.config import (
+    LISTEN_HOST, LISTEN_PORT, ASUS_IP_WHITELIST,
+    NODE_ID, LOG_DIR, HEARTBEAT_INTERVAL,
+)
+
+logger = logging.getLogger("chaari.dell.server")
+
+
+class DellServer:
+    """
+    TCP server for the Dell execution node.
+
+    Accepts connections from ASUS, performs mutual handshake,
+    then enters a message loop: receive commands, send results.
+    """
+
+    def __init__(self, agent):
+        """
+        Args:
+            agent: DellAgent instance (must be booted)
+        """
+        self._agent = agent
+        self._server_socket: socket.socket = None
+        self._running = False
+        self._clients: dict[str, dict] = {}  # node_id → client info
+        self._lock = threading.Lock()
+
+    def start(self, host: str = None, port: int = None) -> None:
+        """Start the TCP server (blocking)."""
+        host = host or LISTEN_HOST
+        port = port or LISTEN_PORT
+
+        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server_socket.settimeout(1.0)  # Allow periodic shutdown check
+        self._server_socket.bind((host, port))
+        self._server_socket.listen(5)
+        self._running = True
+
+        print(f"  [NET] Dell server listening on {host}:{port}")
+        logger.info(f"Server started on {host}:{port}")
+
+        while self._running:
+            try:
+                client_sock, addr = self._server_socket.accept()
+                client_ip = addr[0]
+
+                # IP whitelist check
+                if client_ip not in ASUS_IP_WHITELIST:
+                    logger.warning(f"Rejected connection from unauthorized IP: {client_ip}")
+                    print(f"  [NET] ✗ Rejected: {client_ip} (not in whitelist)")
+                    client_sock.close()
+                    continue
+
+                print(f"  [NET] ✓ Accepted connection from {client_ip}:{addr[1]}")
+                thread = threading.Thread(
+                    target=self._handle_client,
+                    args=(client_sock, addr),
+                    daemon=True,
+                )
+                thread.start()
+
+            except socket.timeout:
+                continue
+            except OSError:
+# CHAARI 2.0 — Dell crypto/validation_pipeline.py — Full Packet Validation
+# ═══════════════════════════════════════════════════════════
+# Responsibility:
+#   ✔ Run ALL validation checks in order
+#   ✔ Reject on first failure (fail-fast)
+#   ✔ Return structured ValidationResult
+#
+# Validation order (from PDF):
+#   1. Structure validation (required fields, version, type)
+#   2. Source IP check (ASUS_IP whitelist)
+#   3. Signature verification (ASUS public key)
+#   4. Timestamp window (±60 seconds)
+#   5. Nonce check (replay protection)
+#   6. Capability group authorization
+#   7. Privilege token (if tier 2+)
+# ═══════════════════════════════════════════════════════════
+
+import json
+import os
+from datetime import datetime
+
+from chaari_dell.models.packet_models import ValidationResult, ValidationStatus
+from chaari_dell.crypto.signature_verifier import SignatureVerifier
+from chaari_dell.crypto.nonce_store import DellNonceStore
+from chaari_dell.config import (
+    ASUS_IP_WHITELIST,
+    AUTHORIZED_CAPABILITIES,
+    TIMESTAMP_WINDOW_SECONDS,
+    NONCE_TTL_SECONDS,
+    LOG_DIR,
+)
+
+VALIDATION_LOG_PATH = os.path.join(LOG_DIR, "validation_audit.jsonl")
+
+
+class ValidationPipeline:
+    """
+    Full packet validation pipeline.
+    
+    ASUS sends a signed command packet → Dell runs this pipeline.
+    If ANY check fails → reject immediately with specific reason.
+    """
+
+    def __init__(self, verifier: SignatureVerifier, nonce_store: DellNonceStore = None):
+        self._verifier = verifier
+        self._nonce_store = nonce_store or DellNonceStore(
+            timestamp_window=TIMESTAMP_WINDOW_SECONDS,
+            nonce_ttl=NONCE_TTL_SECONDS,
+        )
+        os.makedirs(LOG_DIR, exist_ok=True)
+
+    def validate(self, packet: dict, source_ip: str = "127.0.0.1") -> ValidationResult:
+        """
+        Run full validation pipeline on incoming command packet.
+        
+        Args:
+            packet: The signed command packet from ASUS
+            source_ip: IP address of the sender
+            
+        Returns:
+            ValidationResult — check .valid before executing
+        """
+        # ── Step 1: Structure validation ──
+        result = self._check_structure(packet)
+        if not result.valid:
+            self._log("REJECTED", packet, result)
+            return result
+
+        # ── Step 2: Source IP check ──
+        result = self._check_source_ip(packet, source_ip)
+        if not result.valid:
+            self._log("REJECTED", packet, result)
+            return result
+
+        # ── Step 3: Signature verification ──
+        result = self._check_signature(packet)
+        if not result.valid:
+            self._log("REJECTED", packet, result)
+            return result
+
+        # ── Step 4: Timestamp window ──
+        result = self._check_timestamp(packet)
+        if not result.valid:
+            self._log("REJECTED", packet, result)
+            return result
+
+        # ── Step 5: Nonce (replay protection) ──
+        result = self._check_nonce(packet)
+        if not result.valid:
+            self._log("REJECTED", packet, result)
+            return result
+
+        # ── Step 6: Capability group authorization ──
+        result = self._check_capability(packet)
+        if not result.valid:
+            self._log("REJECTED", packet, result)
+            return result
+
+        # ── Step 7: Privilege check (tier 3 only) ──
+        result = self._check_privilege(packet)
+# CHAARI 2.0 — Dell executor/capability_router.py — Capability-Based Routing
+# ═══════════════════════════════════════════════════════════
+# Routes validated command packets to the correct capability module.
+# Each capability group has its own isolated module.
+#
+# KEY DESIGN PRINCIPLE:
+#   A FILESYSTEM command can NEVER reach the POWER module.
+#   Routing is based on capability_group field, NOT intent string parsing.
+# ═══════════════════════════════════════════════════════════
+
+import time
+from datetime import datetime
+
+from chaari_dell.models.packet_models import ExecutionResult
+
+
+class CapabilityRouter:
+    """
+    Routes packets to capability modules based on capability_group.
+    
+    Each module is registered with a group name.
+    Router ONLY dispatches — it never executes directly.
+    """
+
+    def __init__(self):
+        self._modules: dict[str, object] = {}
+
+    def register(self, capability_group: str, module):
+        """
+        Register a capability module.
+        
+        Args:
+            capability_group: e.g., "POWER", "FILESYSTEM"
+            module: Object with execute(intent, context) -> ExecutionResult
+        """
+        self._modules[capability_group.upper()] = module
+
+    def route(self, packet: dict) -> ExecutionResult:
+        """
+        Route a validated packet to the correct capability module.
+        
+        Args:
+            packet: Validated command packet (already passed validation pipeline)
+            
+        Returns:
+            ExecutionResult from the capability module
+        """
+        cap_group = packet.get("capability_group", "").upper()
+        intent = packet.get("intent", "")
+        context = packet.get("context", {})
+        trace_id = packet.get("trace_id", "")
+
+        module = self._modules.get(cap_group)
+        if not module:
+            return ExecutionResult(
+                intent=intent,
+                status="rejected",
+                error=f"No module registered for capability group: {cap_group}",
+                trace_id=trace_id,
+            )
+
+        start = time.time()
+        try:
+            result = module.execute(intent, context)
+            result.trace_id = trace_id
+            result.duration_ms = int((time.time() - start) * 1000)
+            return result
+        except Exception as e:
+            return ExecutionResult(
+                intent=intent,
+                status="failure",
+                error=f"Execution error: {str(e)}",
+                trace_id=trace_id,
+                duration_ms=int((time.time() - start) * 1000),
+            )
+
+    def list_modules(self) -> dict[str, str]:
+        """List registered capability modules."""
+        return {
+            group: type(module).__name__
+            for group, module in self._modules.items()
+        }
