@@ -15,11 +15,6 @@
 
 ---
 
-## Demo
-
-<!-- Add your demo video here -->
-> 📽️ **[Demo video / GIF coming soon]** — Replace this line with a screen recording of CHAARI responding to a Hinglish voice command, executing a tool call, and speaking back with the Jarvis-style echo effect.
-
 ---
 
 ## Key Features
