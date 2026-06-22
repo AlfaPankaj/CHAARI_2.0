@@ -528,7 +528,7 @@ CHAARI 2.0 uses a fine-tuned **Qwen 2.5 4B** as its local LLM backbone (`chaari-
 
 A research paper describing CHAARI 2.0's architecture — covering the two-node cryptographic mesh, 7-layer safety pipeline, RAPTOR RAG integration, and Hinglish fine-tuning methodology — is currently in preparation.
 
-> 📄 **arXiv preprint coming soon** — `[placeholder link]`
+> 📄 **arXiv preprint coming soon**
 
 If you are working on edge-deployed agentic AI, safety-critical voice systems, or low-resource multilingual LLMs and would like to collaborate or discuss the work, reach out directly.
 
