@@ -143,6 +143,58 @@ Runs **before and after** the LLM — code-based logic, not prompt-based:
 
 ---
 
+## 🛠️ Tool Selection & Intent Hierarchy
+
+To prevent cross-module safety breaches, CHAARI 2.0 uses a structured **Intent Hierarchy System** mapped to isolated **Capability Groups** on the execution plane. Each capability group handles exactly one domain of system operations, ensuring that filesystems, media interfaces, and network sockets are strictly walled from each other.
+
+### Capability Isolation Groups
+1. **POWER:** Critical power control actions (Shutdown, Restart, Lock).
+2. **FILESYSTEM:** File operations (Create, Open, Copy, Move, Delete).
+3. **APPLICATION:** App lifecycle and window management (Launch, Close, Minimize, Maximize, discovery).
+4. **COMMUNICATION:** External integration interface (Telegram/WhatsApp GUI macros, contact dialing, text input simulation).
+5. **MEDIA:** Capture and audio drivers (Volume controls, screenshots, OCR processes).
+6. **WEB:** Browser and search bindings (Google searches, YouTube player controls, domain routing).
+7. **SYSTEM:** Deep OS system utilities (Registry modifications, active processes management, storage formatting).
+
+### Namespace & Safety Tier Mapping Table
+User speech inputs are parsed and resolved into one of the following hardcoded intents. No dynamic strings or shell commands are ever passed directly to the executor nodes:
+
+| Flat Intent | Capability Group | Hierarchical Namespace | Execution Safety Tier | Details & Automation Library |
+|---|---|---|---|---|
+| `SHUTDOWN` | `POWER` | `SYSTEM.POWER.SHUTDOWN` | **Tier 3** (Destructive) | Shutdown command (requires 6-digit OTC) |
+| `RESTART` | `POWER` | `SYSTEM.POWER.RESTART` | **Tier 3** (Destructive) | Reboot system (requires 6-digit OTC) |
+| `LOCK_SCREEN` | `POWER` | `SYSTEM.POWER.LOCK` | **Tier 1** (Safe) | Locks the Windows screen via User32 DLL |
+| `CREATE_FILE` | `FILESYSTEM` | `FILESYSTEM.FILE.CREATE` | **Tier 2** (High-Risk) | Creates files with verified file extension |
+| `DELETE_FILE` | `FILESYSTEM` | `FILESYSTEM.FILE.DELETE` | **Tier 2** (High-Risk) | Deletes files with user confirmation |
+| `COPY_FILE` | `FILESYSTEM` | `FILESYSTEM.FILE.COPY` | **Tier 2** (High-Risk) | Copies files to target directory paths |
+| `MOVE_FILE` | `FILESYSTEM` | `FILESYSTEM.FILE.MOVE` | **Tier 2** (High-Risk) | Moves files to target directory paths |
+| `OPEN_FILE` | `FILESYSTEM` | `FILESYSTEM.FILE.OPEN` | **Tier 2** (High-Risk) | Safely opens local files using os.startfile |
+| `OPEN_FOLDER` | `FILESYSTEM` | `FILESYSTEM.FOLDER.OPEN` | **Tier 1** (Safe) | Opens directories in Windows Explorer |
+| `OPEN_APP` | `APPLICATION` | `APPLICATION.LIFECYCLE.LAUNCH` | **Tier 1** (Safe) | Launches whitelisted application binaries |
+| `CLOSE_APP` | `APPLICATION` | `APPLICATION.LIFECYCLE.TERMINATE` | **Tier 2** (High-Risk) | Closes active application window threads |
+| `MINIMIZE_APP` | `APPLICATION` | `APPLICATION.WINDOW.MINIMIZE` | **Tier 1** (Safe) | Minimizes foreground window via Win32 GUI |
+| `MAXIMIZE_APP` | `APPLICATION` | `APPLICATION.WINDOW.MAXIMIZE` | **Tier 1** (Safe) | Maximizes active application viewport |
+| `RESTORE_APP` | `APPLICATION` | `APPLICATION.WINDOW.RESTORE` | **Tier 1** (Safe) | Restores application windows from taskbar |
+| `SWITCH_WINDOW` | `APPLICATION` | `APPLICATION.WINDOW.SWITCH` | **Tier 1** (Safe) | Toggles active foreground window targets |
+| `LIST_APPS` | `APPLICATION` | `APPLICATION.DISCOVERY.LIST` | **Tier 1** (Safe) | Scans system start menu directories |
+| `SEND_MESSAGE` | `COMMUNICATION` | `COMMUNICATION.MESSAGING.SEND` | **Tier 2** (High-Risk) | WhatsApp Desktop GUI macros (PyAutoGUI) |
+| `MAKE_CALL` | `COMMUNICATION` | `COMMUNICATION.CALLING.DIAL` | **Tier 2** (High-Risk) | WhatsApp Desktop voice calling automation |
+| `TYPE_TEXT` | `COMMUNICATION` | `COMMUNICATION.INPUT.TYPE_TEXT` | **Tier 2** (High-Risk) | Simulates keyboard text entry sequences |
+| `VOLUME_UP` | `MEDIA` | `MEDIA.AUDIO.VOLUME_UP` | **Tier 1** (Safe) | Increments system volume level using ctypes |
+| `VOLUME_DOWN` | `MEDIA` | `MEDIA.AUDIO.VOLUME_DOWN` | **Tier 1** (Safe) | Decrements system volume level using ctypes |
+| `MUTE` | `MEDIA` | `MEDIA.AUDIO.MUTE` | **Tier 1** (Safe) | Toggles system volume mute state |
+| `SCREENSHOT` | `MEDIA` | `MEDIA.CAPTURE.SCREENSHOT` | **Tier 1** (Safe) | Captures desktop screen (Pillow library) |
+| `SCREENSHOT_WINDOW` | `MEDIA` | `MEDIA.CAPTURE.SCREENSHOT_WINDOW` | **Tier 1** (Safe) | Captures currently focused window viewport |
+| `OCR_SCREEN` | `MEDIA` | `MEDIA.CAPTURE.OCR_SCREEN` | **Tier 1** (Safe) | OCR scan using Tesseract engine |
+| `SEARCH_GOOGLE` | `WEB` | `WEB.SEARCH.GOOGLE` | **Tier 1** (Safe) | Searches query via selenium / default browser |
+| `SEARCH_YOUTUBE` | `WEB` | `WEB.SEARCH.YOUTUBE` | **Tier 1** (Safe) | Opens query query in Youtube webpage |
+| `OPEN_WEBSITE` | `WEB` | `WEB.BROWSE.OPEN` | **Tier 1** (Safe) | Opens verified URL in browser |
+| `KILL_PROCESS` | `SYSTEM` | `SYSTEM.PROCESS.KILL` | **Tier 2** (High-Risk) | Terminates running processes using psutil |
+| `MODIFY_REGISTRY` | `SYSTEM` | `SYSTEM.REGISTRY.MODIFY` | **Tier 4** (Creator-Only) | Edits Windows registry properties (restricted) |
+| `FORMAT_DISK` | `SYSTEM` | `SYSTEM.STORAGE.FORMAT` | **Tier 4** (Creator-Only) | Administrative disk formatting commands (restricted) |
+
+---
+
 ## Performance Benchmarks
 
 | Component | Target | Notes |
@@ -159,60 +211,53 @@ Runs **before and after** the LLM — code-based logic, not prompt-based:
 
 ---
 
-## Tech Stack
+## 🛠️ Tech Stack
 
-### LLM
+### LLM & Inference
 | Component | Technology |
 |---|---|
-| Primary cloud LLM | Groq API — `llama-3.1-8b-instant` |
-| Local fallback | Ollama — `chaari-2.0:latest` (fine-tuned Qwen 3.5 4.2B) |
-| Fine-tuning base | Qwen 3.5 4.2B on custom Hinglish dataset |
-| Inference backend | Ollama (local), Groq (cloud) |
+| Cloud LLM (primary) | Groq API — `llama-3.1-8b-instant` |
+| Local LLM (fallback) | Ollama — `chaari-2.0:latest` (Qwen 2.5 4B fine-tune) |
+| Fine-tuning base | Qwen 2.5 4B · custom Hinglish instruction dataset (GenderShield verified) |
+| Vision | Llava 7B via Ollama · Tesseract OCR |
 
-### Voice
+### Voice Pipeline
 | Component | Technology |
 |---|---|
-| STT primary | Chrome Web Speech API (live streaming) |
-| STT fallback | Faster Whisper |
-| TTS | Microsoft Edge TTS (`edge-tts`) — neural voices |
-| Audio playback | pygame with echo effect |
-| Wake word | OpenWakeWord — "Hey CHAARI" |
-| Keyboard trigger | `pynput` — `Ctrl+Space` |
+| STT (primary) | Chrome Web Speech API (live streaming) |
+| STT (fallback) | Faster Whisper (offline, local) |
+| TTS | Microsoft Edge TTS · `en-IN-NeerjaNeural` (Indian Female Voice) |
+| Audio playback | pygame · Jarvis-style stereo echo effect |
+| Wake word | OpenWakeWord — `Hey CHAARI` |
+| Keyboard trigger | `Ctrl+Space` / `F5` |
 
 ### Security & Crypto
 | Component | Technology |
 |---|---|
-| Signing algorithm | RSA-2048 (PKCS#1 v1.5 / PSS) |
-| Key management | `crypto/key_manager.py`, `chaari_dell/crypto/signature_verifier.py` |
-| Replay protection | Nonce store with TTL (5 min), timestamp window (±60 s) |
-| Handshake | 3-step: `hello → response → ack` |
-| Audit trail | Append-only JSONL log with `AuditEventType` + `AuditSeverity` |
+| Packet signing | RSA-2048 (PyCryptodome / cryptography) |
+| Replay protection | Nonce store with TTL expiry |
+| Session handshake | 3-step challenge-response |
+| Audit trail | Append-only structured JSONL event log |
+| Confirmation codes | OTC-style 6-digit one-time codes |
 
-### RAG
-| Component | Technology |
-|---|---|
-| Architecture | RAPTOR 3-level hierarchical |
-| Embeddings | `core/embeddings.py` (local) |
-| Vector store | `core/vectorstore.py` |
-| Tree builder | `core/tree_builder.py` |
-| Document loader | `core/doc_loader.py` |
-| RAG agent | `core/rag_agent.py` (Groq-powered summarization) |
-
-### Vision
-| Component | Technology |
-|---|---|
-| Vision model | Llava 7B via Ollama |
-| OCR + image understanding | `core/vision_engine.py` |
+### RAG & Memory
+| Component | Technology / Library | Version / Depth |
+|---|---|---|
+| Vector Store | ChromaDB | `>=0.4.0` |
+| Text Embeddings | `sentence-transformers` | `>=2.2.0` |
+| Clustering Engine | `scikit-learn` | `>=1.3.0` |
+| RAG Architecture | RAPTOR Hierarchical Retrieval Tree | 3-Level (Raw, Clusters, Summaries) |
+| PDF Parsing | `pypdf` | `>=3.0.0` |
+| Tokenizer | `tiktoken` | `>=0.5.0` |
+| Memory | In-session sliding window | Configurable history depth |
 
 ### Infrastructure
 | Component | Technology |
 |---|---|
-| Networking | Raw TCP sockets — port `9734` |
-| Protocol | Custom `chaari_2_0/network/` — `send_message` / `recv_message` |
-| UI | Gradio (`skills/chaari-web-ui/scripts/gradio_app.py`) |
-| Memory | `core/memory.py` — per-session + persistent |
-| Config | `config/rag.py`, `config/security.py`, `config/voice.py` |
-| Testing | pytest — 369+ automated tests across 11 test modules |
+| Inter-node transport | Encrypted TCP · RSA-signed packets |
+| Web UI | Gradio chatbot interface |
+| Testing | pytest · 369+ automated tests |
+| Config management | Per-module Python config files |
 
 ---
 
@@ -426,60 +471,56 @@ CHAARI 2.0/
 
 ---
 
-## Safety Architecture
+## 🛡️ Safety Architecture
 
-CHAARI's safety pipeline runs **entirely in code** — no prompt-based safety. It executes before the LLM receives input and again before any action is dispatched.
+CHAARI 2.0 implements a **7-layer safety pipeline** that runs entirely in code — not in prompts. Every user input passes through all layers before reaching the LLM; LLM output is sanitized before execution.
 
-| Layer | Module | Responsibility |
+| Layer | Component | Responsibility |
 |---|---|---|
-| **0 — Safety Kernel** | `core/safety.py` | Injection detection, intent classification, tier assignment (1–4), severity scoring (`LOW / MEDIUM / HIGH`). Returns a `SafetyResult` contract. Never executes — only decides. |
-| **0.5 — Audit Logger** | `core/audit_logger.py` | Append-only JSONL audit trail. Every request logged with `AuditEventType` and `AuditSeverity`. Cannot be disabled at runtime. |
-| **1 — Identity Lock** | `core/identity.py` | Hard-coded identity block injected into every LLM prompt. Name, creator, version, capability list — immutable at runtime. |
-| **1.5 — Policy Engine** | `core/policy_engine.py` | Governance rules: maps intents to `PolicyTier`. Defines which actions require confirmation, which are creator-only. |
-| **2 — Tool Truth** | `core/tools.py` | Authoritative tool registry with app whitelist (`APP_WHITELIST`). Only whitelisted actions can be dispatched. |
-| **2.5 — Confirmation Engine** | `core/confirmation.py` | Manages one-time codes for Tier 3 destructive actions (shutdown, format). Codes are time-limited and single-use. |
-| **2.6 — Privilege Manager** | `core/privilege.py` | Tracks creator mode state. Tier 4 (creator-only) actions gate on this layer. |
+| **L0** | Safety Kernel | Injection detection, intent classification, tier assignment, severity scoring, LLM output sanitization |
+| **L0.5** | Audit Logger | Append-only, tamper-evident log of every security event with timestamp and severity |
+| **L1** | Identity Lock | Hard-codes `name=Chaari` and `creator=Pankaj` into every prompt — cannot be overridden at runtime |
+| **L1.5** | Policy Engine | Governance rules — maps intents to allowed tiers, enforces context-based access control |
+| **L2** | Tool Truth | App whitelist, tool registry — LLM can only invoke pre-approved tools with validated parameters |
+| **L2.5** | Confirmation Engine | Manages pending confirmations and one-time codes (OTC) for Tier 3 destructive operations |
+| **L2.6** | Privilege Manager | Creator mode state — Tier 4 commands only execute when creator identity is verified |
 
-**Tier classification:**
-- **Tier 1** — Safe: open app, system info, chat
-- **Tier 2** — High-risk: delete file, send message
-- **Tier 3** — Destructive: shutdown, restart — requires 6-digit one-time code
-- **Tier 4** — Creator-only: modify safety rules, privilege escalation
+**Tier system:**
+- **Tier 1** — Safe (open apps, read system info) — execute immediately
+- **Tier 2** — High-risk (file operations, process kill) — require explicit confirmation
+- **Tier 3** — Destructive (shutdown, restart, mass delete) — require 6-digit one-time code
+- **Tier 4** — Creator-only — only accessible when creator mode is active via Privilege Manager
 
----
-
-## Fine-Tuning
-
-The local model (`chaari-2.0:latest`) is a fine-tuned **Qwen 3.5 4.2B** trained on a custom Hinglish conversation dataset assembled by Pankaj Yadav. The dataset covers:
-
-- Hinglish command phrasing variants (mixed Hindi-English OS commands)
-- Feminine Hindi grammar patterns (`kar rahi hoon`, `karungi`, `sakti hoon`)
-- Cultural register vocabulary and response styles
-- Tool-augmented dialogue (system info, file ops, app control)
-- Safety refusal patterns and identity-lock responses
-
-Training was performed on an RTX 2050 (4 GB VRAM). Inference achieves **30–40 tok/s** at 4-bit quantization. The base Groq model (`llama-3.1-8b-instant`) handles primary inference during active development; the fine-tuned Qwen is the target for fully-offline deployment.
-
-> Dataset and training scripts will be released separately. See the Roadmap for timeline.
+The Safety Kernel **never executes OS commands** — it only classifies and signals. Execution is always delegated to `SystemCommandRegistry` → `OSExecutor` on the Executor node.
 
 ---
 
-## Roadmap
+## 🧪 Fine-Tuning & Data Preparation
 
-| Milestone | Status |
-|---|---|
-| 7-layer safety pipeline | ✅ Complete |
-| Two-node cryptographic mesh (ASUS ↔ Dell) | ✅ Complete |
-| RAPTOR 3-level RAG | ✅ Complete |
-| Full-duplex voice (STT + TTS + wake word) | ✅ Complete |
-| Vision module (OCR + Llava) | ✅ Complete |
-| 369+ automated tests | ✅ Complete |
-| S2S (Speech-to-Speech) pipeline < 200 ms | 🔄 In development |
-| Fully-offline 4 GB RAM target (Qwen fine-tune) | 🔄 In development |
-| Hinglish dataset public release | 📅 Planned |
-| Multi-node scaling (3+ executor nodes) | 📅 Planned |
-| Mobile companion app (Android) | 📅 Planned |
-| arXiv research paper | 📅 In preparation |
+CHAARI 2.0 uses a fine-tuned **Qwen 2.5 4B** as its local LLM backbone (`chaari-2.0:latest`).
+
+**Dataset Preparation (`text_expander.py`):**
+- **Data Scaling:** A custom text expansion engine, `text_expander.py`, leverages Ollama to scale a base set of 249 seed conversation samples up to a dataset of **1,000+ Hinglish dialogues**.
+- **GenderShield Validation:** A regex-based safety layer (`GenderShield`) validates every generated script to ensure that CHAARI uses feminine Hindi verb endings (e.g., *rahi*, *karti*, *karungi*) for all self-representation.
+- **Checkpointing:** Includes automatic recovery saving every 25 samples during compilation tasks.
+
+**Training Configurations:**
+- Base model: `Qwen/Qwen2.5-4B-Instruct`
+- Method: QLoRA fine-tuning (4-bit quantized, fits in 4GB VRAM)
+- Inference speed: **30–40 tok/s** on RTX 2050 4GB via Ollama
+
+---
+
+## 🗺️ Roadmap
+
+- [x] **Phase 7: Triple-Brain Orchestrator** — Reflex/Core/Reasoning latency paths, VAD-based voice barge-in, and production-level CLI.
+- [ ] **Phase 8: E2E S2S Model** — Perform architecture surgery on Qwen 2.5 4B for 8 audio heads and integrate Mimi codec tokenization for direct speech-to-speech inference (target: <200ms latency).
+- [ ] **Offline 4GB RAM Target** — Full functionality on CPU-only devices with quantized models; designed for Tier-2/3 city users in India without high-end hardware.
+- [ ] **Multi-Node Scaling** — Extend the cryptographic mesh beyond two nodes; support phone (Android) as a third executor node.
+- [ ] **Android Companion App** — Lightweight mobile node that pairs with the Brain over LAN.
+- [ ] **Hinglish Dataset Release** — Open-source the fine-tuning dataset for the research community.
+- [ ] **Extended Tool Registry** — Calendar, email, browser automation, IoT device control.
+- [ ] **Research Paper Publication** — arXiv preprint (see below).
 
 ---
 
